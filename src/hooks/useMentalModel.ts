@@ -10,6 +10,7 @@ import {
   getMockInterventions,
   createMockUnderstoodModel,
 } from '../data/mockData';
+import { useAuth } from '../contexts/AuthContext';
 
 const hasBackendUrl = !!import.meta.env.VITE_API_BASE_URL;
 
@@ -33,16 +34,14 @@ interface UseMentalModelReturn extends MentalModelState {
   markUnderstood: (conceptId: string) => Promise<void>;
 }
 
-const resolveUserId = (): string => {
-  const stored = localStorage.getItem('cognivault_userId');
-  if (stored) return stored;
-  const generated = `user_${crypto.randomUUID()}`;
-  localStorage.setItem('cognivault_userId', generated);
-  return generated;
-};
-
+/**
+ * SECURITY: userId is now derived from Supabase auth session.
+ * Never use localStorage-generated IDs in production.
+ * auth.uid() is the single source of truth for user identity.
+ */
 export const useMentalModel = (): UseMentalModelReturn => {
-  const [userId] = useState<string>(resolveUserId);
+  const { user } = useAuth();
+  const userId = user?.id ?? '';
 
   const [state, setState] = useState<MentalModelState>({
     model: null,

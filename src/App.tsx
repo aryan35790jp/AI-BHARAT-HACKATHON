@@ -11,6 +11,7 @@ import { DeleteConfirmModal } from './components/DeleteConfirmModal';
 import { useMentalModel } from './hooks/useMentalModel';
 import { useAnalysis } from './hooks/useAnalysis';
 import { useChatStore } from './store/chatStore';
+import { useAuth } from './contexts/AuthContext';
 import { detectDomain, getInitialDomainNodes, domainsMatch } from './utils/domainDetection';
 import type { AnalyzeResponse, InspectedNode } from './types/models';
 
@@ -18,6 +19,7 @@ type AppView = 'analysis' | 'map';
 
 const App: React.FC = () => {
   const { userId } = useMentalModel();
+  const { user, signOut } = useAuth();
 
   const {
     loading: analysisLoading,
@@ -98,6 +100,13 @@ const App: React.FC = () => {
   useEffect(() => {
     cleanupBrokenMessages();
   }, [cleanupBrokenMessages]);
+
+  /* ── Hydrate chats from Supabase on login ── */
+  useEffect(() => {
+    if (user?.id) {
+      useChatStore.getState().hydrateFromSupabase(user.id);
+    }
+  }, [user?.id]);
 
   /* ── Handlers ── */
   const handleNewChat = useCallback(() => {
@@ -346,6 +355,15 @@ const App: React.FC = () => {
                 <span className="rounded-full bg-emerald-400/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-400">
                   {chats.length} chat{chats.length !== 1 ? 's' : ''}
                 </span>
+              )}
+              {user && (
+                <button
+                  onClick={signOut}
+                  className="rounded-md px-2.5 py-1 text-[11px] font-medium text-text-secondary hover:text-text-primary hover:bg-surface/60 transition-colors"
+                  title="Sign out"
+                >
+                  Sign out
+                </button>
               )}
             </div>
           </header>

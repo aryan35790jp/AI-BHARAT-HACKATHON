@@ -1,4 +1,5 @@
 import client from './client';
+import { supabase } from '../lib/supabase';
 import type {
   MentalModelGraph,
   EvidenceSubmission,
@@ -10,11 +11,26 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
+/**
+ * SECURITY: Every fetch request includes the Supabase JWT.
+ * The backend extracts user identity from this token — never trust
+ * user-supplied IDs.
+ */
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`;
+  }
+  return headers;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit, retryCount = 0): Promise<T> {
+  const authHeaders = await getAuthHeaders();
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      ...authHeaders,
       ...(init?.headers ?? {}),
     },
   });
@@ -171,9 +187,10 @@ export function streamAnalyzeConcept(
 
   (async () => {
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch(`${STREAM_BASE}/stream-analyze`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders },
         body: JSON.stringify(params),
         signal: controller.signal,
       });

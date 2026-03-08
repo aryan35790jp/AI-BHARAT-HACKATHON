@@ -2,10 +2,29 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Chat, ChatMessage } from '../types/chat';
 import type { AnalyzeResponse } from '../types/models';
+import {
+  fetchChats,
+  fetchMessagesForChat,
+  createChatInDb,
+  updateChatInDb,
+  deleteChatInDb,
+  createMessageInDb,
+  updateMessageInDb,
+  saveAnalysisResult,
+  recordLearningEvent,
+} from '../services/supabaseData';
 
 /* ─── Helpers ─── */
 const uid = (): string => crypto.randomUUID();
 const now = (): string => new Date().toISOString();
+
+/**
+ * Fire-and-forget Supabase sync. Errors are logged but never block the UI.
+ * This ensures the app remains snappy while data persists in the background.
+ */
+const syncToDb = (fn: () => Promise<void>) => {
+  fn().catch((err) => console.warn('[Supabase sync]', err));
+};
 
 /* ─── Store Shape ─── */
 interface ChatStore {
@@ -45,6 +64,10 @@ interface ChatStore {
 
   /* ── Title ── */
   autoTitleChat: (chatId: string, concept: string) => void;
+
+  /* ── Supabase Hydration ── */
+  /** Load chats & messages from Supabase for the authenticated user */
+  hydrateFromSupabase: (userId: string) => Promise<void>;
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -119,6 +142,7 @@ export const useChatStore = create<ChatStore>()(
           chats: [chat, ...s.chats],
           currentChatId: id,
         }));
+        syncToDb(() => createChatInDb(chat));
         return id;
       },
 
@@ -130,6 +154,7 @@ export const useChatStore = create<ChatStore>()(
               : c,
           ),
         }));
+        syncToDb(() => updateChatInDb(chatId, { domain, domain_nodes: domainNodes }));
       },
 
       createChatBackground: (userId: string) => {
@@ -143,8 +168,8 @@ export const useChatStore = create<ChatStore>()(
           createdAt: timestamp,
           updatedAt: timestamp,
         };
-        // Intentionally does NOT change currentChatId — map stays on current chat
         set((s) => ({ chats: [chat, ...s.chats] }));
+        syncToDb(() => createChatInDb(chat));
         return id;
       },
 
@@ -158,6 +183,7 @@ export const useChatStore = create<ChatStore>()(
             c.id === chatId ? { ...c, title: title.trim() || c.title, updatedAt: now() } : c,
           ),
         }));
+        syncToDb(() => updateChatInDb(chatId, { title: title.trim() }));
       },
 
       deleteChat: (chatId: string) => {
@@ -173,6 +199,7 @@ export const useChatStore = create<ChatStore>()(
                 : s.currentChatId,
           };
         });
+        syncToDb(() => deleteChatInDb(chatId));
       },
 
       pinChat: (chatId: string) => {
@@ -181,6 +208,7 @@ export const useChatStore = create<ChatStore>()(
             c.id === chatId ? { ...c, pinned: true, updatedAt: now() } : c,
           ),
         }));
+        syncToDb(() => updateChatInDb(chatId, { pinned: true }));
       },
 
       unpinChat: (chatId: string) => {
@@ -189,6 +217,7 @@ export const useChatStore = create<ChatStore>()(
             c.id === chatId ? { ...c, pinned: false, updatedAt: now() } : c,
           ),
         }));
+        syncToDb(() => updateChatInDb(chatId, { pinned: false }));
       },
 
       togglePinChat: (chatId: string) => {
@@ -215,6 +244,7 @@ export const useChatStore = create<ChatStore>()(
             c.id === chatId ? { ...c, updatedAt: now() } : c,
           ),
         }));
+        syncToDb(() => createMessageInDb({ id, chatId, role: 'user', content }));
         return id;
       },
 
@@ -235,6 +265,7 @@ export const useChatStore = create<ChatStore>()(
             c.id === chatId ? { ...c, updatedAt: now() } : c,
           ),
         }));
+        // Don't persist streaming placeholder yet — wait until finalized
         return id;
       },
 
@@ -244,6 +275,39 @@ export const useChatStore = create<ChatStore>()(
             m.id === msgId ? { ...m, ...patch } : m,
           ),
         }));
+        // Persist to Supabase when streaming finishes (final content + analysis)
+        if (patch.streaming === false && (patch.content || patch.analysis)) {
+          const msg = get().messages.find((m) => m.id === msgId);
+          if (msg) {
+            const chatId = msg.chatId;
+            // Create the message in Supabase now that it's finalized
+            syncToDb(async () => {
+              await createMessageInDb({
+                id: msgId,
+                chatId,
+                role: 'assistant',
+                content: patch.content ?? msg.content,
+                analysis: patch.analysis ?? msg.analysis,
+              });
+              // Also save analysis result if present
+              if (patch.analysis) {
+                await saveAnalysisResult({
+                  chatId,
+                  messageId: msgId,
+                  analysis: patch.analysis,
+                });
+                await recordLearningEvent({
+                  eventType: 'analysis',
+                  conceptId: patch.analysis.conceptId,
+                  metadata: {
+                    confidence: patch.analysis.confidence,
+                    level: patch.analysis.understandingLevel,
+                  },
+                });
+              }
+            });
+          }
+        }
       },
 
       cleanupBrokenMessages: () => {
@@ -268,6 +332,12 @@ export const useChatStore = create<ChatStore>()(
             c.id === chatId ? { ...c, updatedAt: now() } : c,
           ),
         }));
+        syncToDb(async () => {
+          await createMessageInDb({ id, chatId, role: 'assistant', content, analysis });
+          if (analysis) {
+            await saveAnalysisResult({ chatId, messageId: id, analysis });
+          }
+        });
         return id;
       },
 
@@ -281,12 +351,35 @@ export const useChatStore = create<ChatStore>()(
               c.id === chatId ? { ...c, title: concept, updatedAt: now() } : c,
             ),
           }));
+          syncToDb(() => updateChatInDb(chatId, { title: concept }));
+        }
+      },
+
+      /* ── Supabase Hydration ── */
+      hydrateFromSupabase: async (userId: string) => {
+        try {
+          const dbChats = await fetchChats();
+          if (dbChats.length > 0) {
+            // Load all messages for each chat
+            const allMessages: ChatMessage[] = [];
+            for (const chat of dbChats) {
+              const msgs = await fetchMessagesForChat(chat.id);
+              allMessages.push(...msgs);
+            }
+            set({
+              chats: dbChats,
+              messages: allMessages,
+              currentChatId: dbChats[0]?.id ?? null,
+            });
+          }
+        } catch (err) {
+          console.warn('[Supabase hydration] Failed, using local data:', err);
         }
       },
     }),
     {
       name: 'cognivault-chats',
-      version: 1,
+      version: 2,
       partialize: (state) => ({
         chats: state.chats,
         // Never persist streaming=true — strip it on save so stale bubbles can't survive a reload

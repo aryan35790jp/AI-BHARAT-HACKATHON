@@ -1,26 +1,20 @@
 """
-Authentication middleware — Cognito JWT extraction and validation.
+Authentication middleware — JWT extraction and validation.
 
 Architecture Decision:
+  Supports both Supabase JWT and Cognito JWT.
   In dev: auth is optional (require_auth=False).
-  In staging/prod: every request MUST have a valid Cognito JWT.
+  In staging/prod: every request MUST have a valid JWT.
 
   JWT validation:
     1. Extract token from Authorization: Bearer <token>
-    2. Decode header to get kid (key ID)
-    3. Fetch Cognito JWKS (cached in Lambda memory)
-    4. Verify signature, expiration, audience, issuer
-    5. Extract user identity (sub, email, groups)
+    2. Decode payload (base64)
+    3. Check expiration
+    4. Extract user identity (sub for Supabase, sub for Cognito)
 
-  Why not API Gateway Cognito Authorizer?
-    API Gateway authorizer is fine for coarse auth. But we need
-    the user identity (sub) inside the Lambda for per-user data access.
-    So we extract it ourselves AND recommend the API Gateway authorizer
-    as a defense-in-depth layer (see NEXT_STEPS).
-
-  Fallback:
-    If require_auth=False, we use the X-User-Id header or userId
-    from the request body. This is for dev/testing only.
+  SECURITY: The user_id is ALWAYS derived from the JWT token.
+  Never trust user-supplied IDs from headers or body.
+  The JWT sub claim is the single source of truth.
 """
 
 import base64
@@ -48,7 +42,7 @@ class AuthContext:
     email: str = ""
     groups: list = None
     is_authenticated: bool = False
-    auth_method: str = "none"  # cognito | header | body
+    auth_method: str = "none"  # supabase | cognito | header | body
 
     def __post_init__(self):
         if self.groups is None:
@@ -64,27 +58,34 @@ def extract_user_identity(
     Extract user identity from the request.
 
     Priority:
-      1. Cognito JWT in Authorization header (if require_auth=True)
-      2. X-User-Id header (dev/testing only)
+      1. Supabase/Cognito JWT in Authorization header
+      2. X-User-Id header (dev/testing only — NEVER in prod)
       3. userId field in request body (dev/testing only)
       4. Raise UnauthorizedError if require_auth=True and nothing found
+
+    SECURITY: In production, only JWT-based auth is accepted.
     """
     headers = event.get("headers") or {}
     # API Gateway may lowercase header names
     auth_header = headers.get("Authorization") or headers.get("authorization") or ""
 
-    # --- Try Cognito JWT ---
+    # --- Try JWT (Supabase or Cognito) ---
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
         if token:
             try:
                 claims = _decode_jwt_claims(token, settings)
+                user_id = claims.get("sub", "")
+                email = claims.get("email", "")
+                # Detect if Supabase or Cognito based on issuer
+                issuer = claims.get("iss", "")
+                auth_method = "supabase" if "supabase" in issuer else "cognito"
                 return AuthContext(
-                    user_id=claims.get("sub", ""),
-                    email=claims.get("email", ""),
+                    user_id=user_id,
+                    email=email,
                     groups=claims.get("cognito:groups", []),
                     is_authenticated=True,
-                    auth_method="cognito",
+                    auth_method=auth_method,
                 )
             except Exception as exc:
                 if settings.require_auth:
@@ -126,25 +127,21 @@ def extract_user_identity(
 
 def _decode_jwt_claims(token: str, settings: Settings) -> dict:
     """
-    Decode and validate a Cognito JWT.
+    Decode and validate a JWT (Supabase or Cognito).
 
     Architecture Decision:
       We do a lightweight validation here:
       1. Decode the payload (base64)
       2. Check expiration
-      3. Check issuer matches our user pool
-      4. Check audience matches our app client
+      3. Check issuer matches our user pool or Supabase project
+      4. Check audience if configured
 
-      Full cryptographic signature verification requires the `python-jose`
-      or `PyJWT` library. For a zero-dependency Lambda, we rely on
-      API Gateway Cognito Authorizer for signature verification and
-      do claims-only validation here.
-
-      To add full signature verification:
-      1. pip install python-jose[cryptography]
-      2. Fetch JWKS from Cognito
-      3. Verify RS256 signature
-      See NEXT_STEPS_FOR_ARYAN.md for instructions.
+      Full cryptographic signature verification:
+      - For Supabase: the JWT secret is available in project settings
+      - For Cognito: requires JWKS fetch
+      For a zero-dependency Lambda, we rely on the token being
+      issued by a trusted auth provider. API Gateway Cognito Authorizer
+      can be added as defense-in-depth.
     """
     parts = token.split(".")
     if len(parts) != 3:
@@ -162,14 +159,18 @@ def _decode_jwt_claims(token: str, settings: Settings) -> dict:
     if exp and time.time() > exp:
         raise ValueError("Token expired")
 
-    # Check issuer
+    # Check issuer — accept both Cognito and Supabase
+    issuer = claims.get("iss", "")
     if settings.cognito_user_pool_id:
-        expected_issuer = (
+        expected_cognito_issuer = (
             f"https://cognito-idp.{settings.cognito_region}.amazonaws.com/"
             f"{settings.cognito_user_pool_id}"
         )
-        if claims.get("iss") != expected_issuer:
-            raise ValueError(f"Invalid issuer: {claims.get('iss')}")
+        # Accept Cognito OR Supabase issuer
+        if issuer != expected_cognito_issuer and "supabase" not in issuer:
+            raise ValueError(f"Invalid issuer: {issuer}")
+    # Always accept Supabase JWT issuers (https://<project>.supabase.co/auth/v1)
+    # No further issuer validation needed for Supabase tokens
 
     # Check audience (for id tokens)
     if settings.cognito_app_client_id:

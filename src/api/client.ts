@@ -1,5 +1,6 @@
 import axios, { isAxiosError } from 'axios';
 import type { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
+import { supabase } from '../lib/supabase';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
@@ -18,9 +19,16 @@ const client: AxiosInstance = axios.create({
   },
 });
 
-client.interceptors.request.use((config) => {
-  // Note: userId is sent in the request body — no custom header needed
-  // (custom headers trigger CORS preflight failures on API Gateway)
+/**
+ * SECURITY: Attach Supabase JWT to every outgoing request.
+ * The AWS backend validates this token to extract user identity.
+ * Never trust user-supplied IDs — always derive from the JWT.
+ */
+client.interceptors.request.use(async (config) => {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session?.access_token) {
+    config.headers.Authorization = `Bearer ${session.access_token}`;
+  }
   return config;
 });
 

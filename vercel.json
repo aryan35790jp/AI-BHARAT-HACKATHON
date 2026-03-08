@@ -1,0 +1,10 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://uo3kq9at2j.execute-api.us-east-1.amazonaws.com/dev/:path*"
+    },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
+

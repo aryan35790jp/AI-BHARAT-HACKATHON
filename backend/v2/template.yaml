@@ -1,0 +1,356 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  COGNIVAULT v2 — Cognitive Debt Map Backend
+  Production-grade serverless API with multi-model AI analysis,
+  DynamoDB single-table design, cost guardrails, and observability.
+
+# ---------------------------------------------------------------------------
+# Parameters — different values per environment (dev/staging/prod)
+# ---------------------------------------------------------------------------
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  PrimaryModelId:
+    Type: String
+    Default: "meta.llama4-maverick-17b-instruct-v1:0"
+    Description: Primary Bedrock model ID
+
+  FallbackModelId:
+    Type: String
+    Default: "meta.llama3-1-8b-instruct-v1:0"
+    Description: Fallback Bedrock model ID
+
+  DailyBudgetUsd:
+    Type: Number
+    Default: 50
+    Description: Daily Bedrock spending limit in USD
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+
+  RequireAuth:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Require Cognito JWT authentication
+
+  CognitoUserPoolId:
+    Type: String
+    Default: ""
+    Description: Cognito User Pool ID (leave empty to skip auth)
+
+  CognitoAppClientId:
+    Type: String
+    Default: ""
+    Description: Cognito App Client ID
+
+  AllowedOrigins:
+    Type: String
+    Default: "*"
+    Description: CORS allowed origins (restrict in prod)
+
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  IsNotDev: !Not [!Equals [!Ref Environment, dev]]
+
+# ---------------------------------------------------------------------------
+# Globals — shared Lambda configuration
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.11
+    MemorySize: 512
+    Timeout: 60
+    Architectures: [arm64]  # Graviton2 — 20% cheaper, 20% faster
+    Tracing: Active          # X-Ray tracing
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        TABLE_NAME: !Ref CognivaultTable
+        PRIMARY_MODEL_ID: !Ref PrimaryModelId
+        FALLBACK_MODEL_ID: !Ref FallbackModelId
+        BEDROCK_REGION: !Ref AWS::Region
+        LOG_LEVEL: !Ref LogLevel
+        DAILY_BUDGET_USD: !Ref DailyBudgetUsd
+        REQUIRE_AUTH: !Ref RequireAuth
+        COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+        COGNITO_APP_CLIENT_ID: !Ref CognitoAppClientId
+        ALLOWED_ORIGINS: !Ref AllowedOrigins
+        ENABLE_COST_TRACKING: "true"
+        ENABLE_RATE_LIMITING: "true"
+        ENABLE_FALLBACK_MODEL: "true"
+        ENABLE_RULE_BASED_FALLBACK: "true"
+
+  Api:
+    Cors:
+      AllowOrigin: !Sub "'${AllowedOrigins}'"
+      AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Correlation-Id'"
+      AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ---- API Gateway ----
+  CognivaultApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "cognivault-api-${Environment}"
+      StageName: !Ref Environment
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+          MetricsEnabled: false
+          DataTraceEnabled: false
+          LoggingLevel: "OFF"
+
+  # ---- Lambda Function ----
+  CognivaultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "cognivault-backend-${Environment}"
+      Handler: entrypoint.lambda_handler
+      CodeUri: src/
+      Description: "Cognivault v2 — Cognitive Debt Map analysis engine"
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Type: !If [IsProd, Canary10Percent5Minutes, AllAtOnce]
+        Alarms:
+          - !Ref CognivaultErrorAlarm
+      Policies:
+        # DynamoDB — scoped to our table only (least privilege)
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CognivaultTable
+        # Bedrock — scoped to specific models (least privilege)
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${PrimaryModelId}"
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${FallbackModelId}"
+                # Also allow inference profiles
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+        # CloudWatch — for custom metrics
+        - CloudWatchPutMetricPolicy: {}
+        # X-Ray — for tracing
+        - Statement:
+            - Effect: Allow
+              Action:
+                - xray:PutTraceSegments
+                - xray:PutTelemetryRecords
+              Resource: "*"
+      Events:
+        # --- Versioned routes (v1) ---
+        AnalyzeV1:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /v1/analyze
+            Method: POST
+        EvidenceV1:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /v1/evidence
+            Method: POST
+        MentalModelV1:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /v1/mental-model/{userId}
+            Method: GET
+        InterventionsV1:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /v1/interventions/{conceptId}
+            Method: GET
+        UnderstoodV1:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /v1/mental-model/{userId}/concepts/{conceptId}/understood
+            Method: PUT
+
+        # --- Legacy routes (backward compatibility) ---
+        AnalyzeLegacy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /analyze
+            Method: POST
+        EvidenceLegacy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /evidence
+            Method: POST
+        MentalModelLegacy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /mental-model/{userId}
+            Method: GET
+        InterventionsLegacy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /interventions/{conceptId}
+            Method: GET
+        UnderstoodLegacy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /mental-model/{userId}/concepts/{conceptId}/understood
+            Method: PUT
+
+  # ---- DynamoDB Table ----
+  CognivaultTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain  # NEVER delete the table on stack delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "cognivault-data-${Environment}"
+      BillingMode: PAY_PER_REQUEST  # On-demand — scales to zero, no capacity planning
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      SSESpecification:
+        SSEEnabled: true  # Encryption at rest (AWS owned key, free)
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # ---- CloudWatch Log Groups ----
+  CognivaultLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/cognivault-backend-${Environment}"
+      RetentionInDays: !If [IsProd, 90, 14]
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/cognivault-api-${Environment}"
+      RetentionInDays: !If [IsProd, 90, 7]
+
+  # ---- CloudWatch Alarms ----
+  CognivaultErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cognivault-errors-${Environment}"
+      AlarmDescription: "Triggered when Lambda error rate exceeds threshold"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CognivaultFunction
+      Statistic: Sum
+      Period: 300  # 5 minutes
+      EvaluationPeriods: 2
+      Threshold: !If [IsProd, 5, 20]
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CognivaultLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cognivault-latency-${Environment}"
+      AlarmDescription: "Triggered when p99 latency exceeds 10 seconds"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CognivaultFunction
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 10000  # 10 seconds in ms
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CognivaultThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "cognivault-throttles-${Environment}"
+      AlarmDescription: "Triggered when Lambda is being throttled"
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CognivaultFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # ---- Dead Letter Queue (DLQ) ----
+  CognivaultDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "cognivault-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 300
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${CognivaultApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+
+  ApiUrlV1:
+    Description: "API v1 base URL"
+    Value: !Sub "https://${CognivaultApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/v1"
+
+  FunctionArn:
+    Description: "Lambda function ARN"
+    Value: !GetAtt CognivaultFunction.Arn
+
+  TableName:
+    Description: "DynamoDB table name"
+    Value: !Ref CognivaultTable
+
+  DLQUrl:
+    Description: "Dead Letter Queue URL"
+    Value: !Ref CognivaultDLQ

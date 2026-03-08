@@ -1,0 +1,24 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - pip install aws-sam-cli
+  build:
+    commands:
+      - sam build
+  post_build:
+    commands:
+      - |
+        if [ "$ENVIRONMENT" = "prod" ]; then
+          sam deploy --config-env prod --no-confirm-changeset
+        elif [ "$ENVIRONMENT" = "staging" ]; then
+          sam deploy --config-env staging --no-confirm-changeset
+        else
+          sam deploy --no-confirm-changeset
+        fi
+artifacts:
+  files:
+    - template.yaml
+    - .aws-sam/**/*

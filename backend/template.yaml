@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Cognivault - Cognitive Debt Map Backend
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 512
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref CognivaultTable
+        BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+        BEDROCK_REGION: us-east-1
+        LOG_LEVEL: INFO
+
+Resources:
+
+  CognivaultApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-User-Id'"
+        AllowOrigin: "'*'"
+        MaxAge: "'600'"
+
+  AnalyzeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.handle_analyze
+      Description: Analyze concept explanation and detect cognitive debt
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CognivaultTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+      Events:
+        AnalyzeApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /analyze
+            Method: post
+
+  SubmitEvidenceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.handle_submit_evidence
+      Description: Submit evidence for analysis (frontend contract)
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CognivaultTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+      Events:
+        EvidenceApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /evidence
+            Method: post
+
+  GetMentalModelFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.handle_get_mental_model
+      Description: Retrieve user mental model graph
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CognivaultTable
+      Events:
+        GetModelApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /mental-model/{userId}
+            Method: get
+
+  GetInterventionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.handle_get_interventions
+      Description: Fetch micro-interventions for a concept
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CognivaultTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+      Events:
+        InterventionsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /interventions/{conceptId}
+            Method: get
+
+  MarkUnderstoodFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.handle_mark_understood
+      Description: Mark a concept as understood and update model
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CognivaultTable
+      Events:
+        MarkUnderstoodApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CognivaultApi
+            Path: /mental-model/{userId}/concepts/{conceptId}/understood
+            Method: put
+
+  CognivaultTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cognivault-data
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${CognivaultApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref CognivaultTable

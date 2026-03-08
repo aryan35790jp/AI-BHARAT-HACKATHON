@@ -1,0 +1,31 @@
+# SAM CLI configuration
+# Usage: sam deploy --config-env dev|staging|prod
+
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "cognivault-dev"
+resolve_s3 = true
+s3_prefix = "cognivault-dev"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "Environment=dev LogLevel=DEBUG RequireAuth=false DailyBudgetUsd=10 AllowedOrigins=*"
+
+[staging.deploy.parameters]
+stack_name = "cognivault-staging"
+resolve_s3 = true
+s3_prefix = "cognivault-staging"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "Environment=staging LogLevel=INFO RequireAuth=false DailyBudgetUsd=25 AllowedOrigins=*"
+
+[prod.deploy.parameters]
+stack_name = "cognivault-prod"
+resolve_s3 = true
+s3_prefix = "cognivault-prod"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "Environment=prod LogLevel=WARNING RequireAuth=true DailyBudgetUsd=50 AllowedOrigins=https://cognivault.example.com"

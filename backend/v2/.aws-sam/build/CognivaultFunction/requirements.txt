@@ -1,5 +1,0 @@
-# Production dependencies (included in Lambda package)
-# Architecture Decision: Zero external dependencies beyond boto3.
-# boto3 and botocore are pre-installed in the Lambda runtime.
-# This keeps the package small (< 1MB) for fast cold starts.
-boto3>=1.34.0

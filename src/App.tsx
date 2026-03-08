@@ -109,10 +109,13 @@ const App: React.FC = () => {
     cleanupBrokenMessages();
   }, [cleanupBrokenMessages]);
 
-  /* ── Hydrate chats from Supabase on login ── */
+  /* ── Hydrate chats from Supabase on login / clear on logout ── */
   useEffect(() => {
     if (user?.id) {
       useChatStore.getState().hydrateFromSupabase(user.id);
+    } else {
+      // User signed out — ensure local state is wiped
+      useChatStore.getState().clearStore();
     }
   }, [user?.id]);
 

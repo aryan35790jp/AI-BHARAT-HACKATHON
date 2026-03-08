@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
+import { useChatStore } from '../store/chatStore';
 
 /* ─── Types ─── */
 interface AuthState {
@@ -59,6 +60,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signOut = useCallback(async () => {
+    // Clear all chat state BEFORE signing out so no stale data leaks
+    useChatStore.getState().clearStore();
     const { error } = await supabase.auth.signOut();
     if (error) console.error('Sign-out error:', error.message);
   }, []);

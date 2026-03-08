@@ -31,6 +31,8 @@ interface ChatStore {
   chats: Chat[];
   messages: ChatMessage[];
   currentChatId: string | null;
+  /** The user ID that owns the current local state */
+  currentUserId: string | null;
 
   /* ── Derived helpers ── */
   getCurrentChat: () => Chat | undefined;
@@ -67,6 +69,8 @@ interface ChatStore {
   /* ── Supabase Hydration ── */
   /** Load chats & messages from Supabase for the authenticated user */
   hydrateFromSupabase: (userId: string) => Promise<void>;
+  /** Clear all local chat state (used on logout) */
+  clearStore: () => void;
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -76,6 +80,7 @@ export const useChatStore = create<ChatStore>()(
       chats: [],
       messages: [],
       currentChatId: null,
+      currentUserId: null,
 
       /* ── Derived helpers ── */
       getCurrentChat: () => {
@@ -355,31 +360,53 @@ export const useChatStore = create<ChatStore>()(
       },
 
       /* ── Supabase Hydration ── */
-      hydrateFromSupabase: async (_userId: string) => {
+      hydrateFromSupabase: async (userId: string) => {
+        // If the userId changed, clear stale data from the previous user immediately
+        const prev = get().currentUserId;
+        if (prev && prev !== userId) {
+          set({ chats: [], messages: [], currentChatId: null, currentUserId: userId });
+        } else {
+          set({ currentUserId: userId });
+        }
+
         try {
           const dbChats = await fetchChats();
-          if (dbChats.length > 0) {
-            // Load all messages for each chat
-            const allMessages: ChatMessage[] = [];
-            for (const chat of dbChats) {
-              const msgs = await fetchMessagesForChat(chat.id);
-              allMessages.push(...msgs);
-            }
-            set({
-              chats: dbChats,
-              messages: allMessages,
-              currentChatId: dbChats[0]?.id ?? null,
-            });
+          // Always replace local state — even if 0 chats (fresh account)
+          const allMessages: ChatMessage[] = [];
+          for (const chat of dbChats) {
+            const msgs = await fetchMessagesForChat(chat.id);
+            allMessages.push(...msgs);
           }
+          set({
+            chats: dbChats,
+            messages: allMessages,
+            currentChatId: dbChats[0]?.id ?? null,
+            currentUserId: userId,
+          });
         } catch (err) {
-          console.warn('[Supabase hydration] Failed, using local data:', err);
+          console.warn('[Supabase hydration] Failed:', err);
+          // On failure, ensure we at least have a clean slate for this user
+          // rather than showing the previous user's data
+          if (prev && prev !== userId) {
+            set({ chats: [], messages: [], currentChatId: null, currentUserId: userId });
+          }
         }
+      },
+
+      clearStore: () => {
+        set({
+          chats: [],
+          messages: [],
+          currentChatId: null,
+          currentUserId: null,
+        });
       },
     }),
     {
       name: 'cognivault-chats',
       version: 2,
       partialize: (state) => ({
+        currentUserId: state.currentUserId,
         chats: state.chats,
         // Never persist streaming=true — strip it on save so stale bubbles can't survive a reload
         // Also drop any blank assistant messages with no analysis (they're broken/incomplete)

@@ -228,11 +228,20 @@ export function buildKnowledgeGraph(
   const inferred = inferRelationships(analyzedIds);
   for (const e of inferred) addEdge(e.source, e.target, 'inferred');
 
-  // Connect all satellite nodes to the root (first analyzed concept)
+  // Connect ORPHAN satellite nodes (those without any AI edge) to the root.
+  // Satellites that already connect to their parent concept keep only that edge.
   if (highConf.length > 0) {
     const rootId = highConf[0].conceptId;
+    const connectedSatellites = new Set<string>();
+    for (const e of edges) {
+      if (typeof e.source === 'string' && e.source.startsWith('sat_')) connectedSatellites.add(e.source);
+      if (typeof e.target === 'string' && e.target.startsWith('sat_')) connectedSatellites.add(e.target);
+    }
     for (const norm of satelliteNames.keys()) {
-      addEdge(rootId, `sat_${norm}`, 'ai');
+      const satId = `sat_${norm}`;
+      if (!connectedSatellites.has(satId)) {
+        addEdge(rootId, satId, 'ai');
+      }
     }
   }
 

@@ -64,26 +64,33 @@ export async function updateChatInDb(
   chatId: string,
   fields: Partial<{ title: string; pinned: boolean; domain: string; domain_nodes: string[] }>
 ): Promise<void> {
+  const userId = await requireUserId();
   const { error } = await supabase
     .from('chats')
     .update({ ...fields, updated_at: new Date().toISOString() })
-    .eq('id', chatId);
+    .eq('id', chatId)
+    .eq('owner_user_id', userId);
   if (error) throw error;
 }
 
 export async function deleteChatInDb(chatId: string): Promise<void> {
+  const userId = await requireUserId();
   // CASCADE will delete messages, analysis_results with chat_id
-  const { error } = await supabase.from('chats').delete().eq('id', chatId);
+  const { error } = await supabase.from('chats').delete()
+    .eq('id', chatId)
+    .eq('owner_user_id', userId);
   if (error) throw error;
 }
 
 /* ─── Message Operations ─── */
 
 export async function fetchMessagesForChat(chatId: string): Promise<ChatMessage[]> {
+  const userId = await requireUserId();
   const { data, error } = await supabase
     .from('messages')
     .select('*')
     .eq('chat_id', chatId)
+    .eq('owner_user_id', userId)
     .order('created_at', { ascending: true });
 
   if (error) throw error;
@@ -122,6 +129,7 @@ export async function updateMessageInDb(
   msgId: string,
   fields: Partial<{ content: string; analysis: AnalyzeResponse | null }>
 ): Promise<void> {
+  const userId = await requireUserId();
   const updateFields: Record<string, unknown> = {};
   if (fields.content !== undefined) updateFields.content = fields.content;
   if (fields.analysis !== undefined) updateFields.analysis = fields.analysis;
@@ -131,7 +139,8 @@ export async function updateMessageInDb(
   const { error } = await supabase
     .from('messages')
     .update(updateFields)
-    .eq('id', msgId);
+    .eq('id', msgId)
+    .eq('owner_user_id', userId);
   if (error) throw error;
 }
 

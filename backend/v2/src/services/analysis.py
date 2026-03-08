@@ -422,10 +422,10 @@ def rule_based_fallback(
 
     if confidence < 0.30:
         suggested_explanation = (
-            f"{concept_label} is a core concept in programming. "
+            f"{concept_label} is an important concept to understand. "
             f"{'It builds on: ' + ', '.join(p.replace('_', ' ') for p in prereqs[:3]) + '. ' if prereqs else ''}"
             f"Understanding it requires knowing both what it is and how it works in practice. "
-            f"Try to think about a concrete example where you've seen or used it."
+            f"Try to think about a concrete example where you've seen or encountered it."
         )
         next_question = (
             f"Can you describe a simple example of {concept_label.lower()} "
@@ -480,13 +480,13 @@ def rule_based_fallback(
                     f"Focus on the 'why' and 'how', not just the 'what'."
                 ),
                 "examples": [
-                    f"Try implementing a small code example that demonstrates {concept_label.lower()}.",
+                    f"Try thinking of a concrete example that demonstrates {concept_label.lower()}.",
                     f"Explain {concept_label.lower()} as if teaching a classmate who knows "
-                    + (prereqs[0].replace('_', ' ') if prereqs else 'basic programming')
+                    + (prereqs[0].replace('_', ' ') if prereqs else 'the basics')
                     + " but not this concept.",
                 ],
                 "followUpQuestions": [
-                    next_question or f"What would happen if you didn't use {concept_label.lower()} in your code?",
+                    next_question or f"What would happen if {concept_label.lower()} didn't exist or wasn't used?",
                     f"Can you give a real-world analogy for {concept_label.lower()}?",
                 ],
             }
@@ -524,14 +524,10 @@ def rule_based_fallback(
                 break
 
     if not related:
-        fundamentals = ["variables", "data_types", "control_flow", "functions", "loops", "classes"]
-        for f in fundamentals:
-            if f != norm:
-                related.add(f)
-            if len(related) >= 6:
-                break
-
-    related_list = sorted(related - {norm})[:8]
+        # No domain graph match — return empty rather than assume programming
+        related_list: list = []
+    else:
+        related_list = sorted(related - {norm})[:8]
 
     return {
         "understandingLevel": level,

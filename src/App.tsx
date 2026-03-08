@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { formatAiResponse } from './utils/formatAiResponse';
 import { Composer } from './components/Composer';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -64,23 +64,31 @@ const App: React.FC = () => {
   const [prefillContent, setPrefillContent] = useState('');
 
   // Current chat data — derived directly from allMessages so streaming updates flow through
-  const currentMessages = currentChatId
-    ? allMessages
-        .filter((m) => m.chatId === currentChatId)
-        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-    : [];
+  const currentMessages = useMemo(
+    () =>
+      currentChatId
+        ? allMessages
+            .filter((m) => m.chatId === currentChatId)
+            .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        : [],
+    [allMessages, currentChatId],
+  );
 
   // Derive the current chat's concept for the composer prefill
   const currentChat = chats.find((c) => c.id === currentChatId);
 
   // Current chat's analyses for the cognitive map (all assistant analyses in this chat)
   // The confidence ≥ 70% filter is enforced inside buildKnowledgeGraph — we pass all here.
-  const currentChatAnalyses = currentChatId
-    ? allMessages
-        .filter((m) => m.chatId === currentChatId && m.role === 'assistant' && m.analysis != null)
-        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-        .map((m) => m.analysis!)
-    : [];
+  const currentChatAnalyses = useMemo(
+    () =>
+      currentChatId
+        ? allMessages
+            .filter((m) => m.chatId === currentChatId && m.role === 'assistant' && m.analysis != null)
+            .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+            .map((m) => m.analysis!)
+        : [],
+    [allMessages, currentChatId],
+  );
 
   // Initial domain placeholder nodes for the current chat's graph
   const currentChatDomainNodes = currentChat?.domainNodes ?? [];

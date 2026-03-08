@@ -9,7 +9,6 @@ import {
   updateChatInDb,
   deleteChatInDb,
   createMessageInDb,
-  updateMessageInDb,
   saveAnalysisResult,
   recordLearningEvent,
 } from '../services/supabaseData';
@@ -356,7 +355,7 @@ export const useChatStore = create<ChatStore>()(
       },
 
       /* ── Supabase Hydration ── */
-      hydrateFromSupabase: async (userId: string) => {
+      hydrateFromSupabase: async (_userId: string) => {
         try {
           const dbChats = await fetchChats();
           if (dbChats.length > 0) {

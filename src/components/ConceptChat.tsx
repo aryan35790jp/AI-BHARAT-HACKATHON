@@ -3,6 +3,28 @@ import { analyzeConcept } from '../api/endpoints';
 import { formatAiResponse } from '../utils/formatAiResponse';
 import type { AnalyzeResponse } from '../types/models';
 
+/* ─── Uncertainty detection ─── */
+
+/** Client-side pre-screening: these patterns mean the user doesn't know yet.
+ *  We skip the LLM call and return a teaching nudge instantly. */
+const UNCERTAINTY_RE =
+  /^(i\s*don'?t\s*know|idk|no\s*idea|not\s*sure|i\s*(have\s+)?no\s*clue|i'?m\s*not\s*sure|i\s*don'?t\s*understand|what\s*is\s*(it|that|this)\??|help\s*me?|explain(\s*it)?|teach\s*me|i\s*forgot|never\s*heard(\s*of\s*it)?|unsure|clueless|dunno|pass|skip|can'?t\s*explain|\?{1,5}|\.{1,3})$/i;
+
+/** Build an instant teaching nudge without wasting an API call. */
+function buildTeachingNudge(concept: string): string {
+  return [
+    `**No worries — let's work through ${concept} together.**`,
+    '',
+    `Think about what "${concept}" might mean in this context. Does it remind you of anything you've encountered before?`,
+    '',
+    'Try starting with:',
+    `• "I think ${concept} might be related to…"`,
+    `• "It could be something that…"`,
+    '',
+    `**Give it your best guess** — even a rough idea helps me tailor my explanation to exactly where you are!`,
+  ].join('\n');
+}
+
 /* ─── Types ─── */
 
 interface ChatMessage {
@@ -67,6 +89,66 @@ export const ConceptChat: React.FC<ConceptChatProps> = ({
     }));
   }, [conceptName]);
 
+  /* ── Stream helper: type text word-by-word into a placeholder message ── */
+  const streamText = useCallback(
+    (text: string, conceptKey: string, opts?: { confidence?: number; level?: string; analysis?: AnalyzeResponse }) => {
+      const words = text.split(' ');
+      let idx = 0;
+      const aiMsgId = crypto.randomUUID();
+
+      setHistories((prev) => ({
+        ...prev,
+        [conceptKey]: [
+          ...(prev[conceptKey] ?? []),
+          { id: aiMsgId, role: 'ai' as const, content: '', timestamp: new Date().toISOString(), streaming: true },
+        ],
+      }));
+      setPhase('streaming');
+
+      const intervalId = setInterval(() => {
+        idx++;
+        const partial = words.slice(0, idx).join(' ');
+
+        setHistories((prev) => ({
+          ...prev,
+          [conceptKey]: (prev[conceptKey] ?? []).map((m) =>
+            m.id === aiMsgId ? { ...m, content: partial } : m,
+          ),
+        }));
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+
+        if (idx >= words.length) {
+          clearInterval(intervalId);
+          streamCancelRef.current = null;
+          setHistories((prev) => ({
+            ...prev,
+            [conceptKey]: (prev[conceptKey] ?? []).map((m) =>
+              m.id === aiMsgId
+                ? { ...m, content: text, streaming: false, confidence: opts?.confidence, level: opts?.level }
+                : m,
+            ),
+          }));
+          setPhase('idle');
+          if (opts?.analysis) onNewAnalysis?.(opts.analysis);
+        }
+      }, 40);
+
+      streamCancelRef.current = () => {
+        clearInterval(intervalId);
+        setPhase('idle');
+      };
+    },
+    [onNewAnalysis],
+  );
+
+  /* ── Cleanup stream on unmount or concept change ── */
+  useEffect(() => {
+    return () => {
+      streamCancelRef.current?.();
+      streamCancelRef.current = null;
+    };
+  }, [conceptName]);
+
   /* Submit explanation — calls regular /v1/analyze then streams text word-by-word */
   const handleSubmit = useCallback(async () => {
     if (!conceptName || !input.trim() || loading) return;
@@ -88,63 +170,25 @@ export const ConceptChat: React.FC<ConceptChatProps> = ({
       [conceptName]: [...(prev[conceptName] ?? []), userMsg],
     }));
     setInput('');
+
+    // ── Client-side uncertainty pre-screening ──
+    // If the user says "I don't know" / "idk" / "?" etc., skip the API
+    // call and show a teaching nudge that encourages them to try.
+    if (UNCERTAINTY_RE.test(userText)) {
+      streamText(buildTeachingNudge(conceptName), conceptName);
+      return;
+    }
+
     setPhase('thinking');
 
     try {
       const result = await analyzeConcept({ concept: conceptName, explanation: userText, userId });
-
-      // Format full response text then stream it word by word
       const fullText = formatAiResponse(result, conceptName);
-      const words = fullText.split(' ');
-      let idx = 0;
-
-      const aiMsgId = crypto.randomUUID();
-
-      // Add empty placeholder with cursor
-      setHistories((prev) => ({
-        ...prev,
-        [conceptName]: [
-          ...(prev[conceptName] ?? []),
-          { id: aiMsgId, role: 'ai', content: '', timestamp: new Date().toISOString(), streaming: true },
-        ],
-      }));
-      setPhase('streaming');
-
-      const intervalId = setInterval(() => {
-        idx++;
-        const partial = words.slice(0, idx).join(' ');
-
-        setHistories((prev) => {
-          const msgs = prev[conceptName] ?? [];
-          return {
-            ...prev,
-            [conceptName]: msgs.map((m) =>
-              m.id === aiMsgId ? { ...m, content: partial } : m,
-            ),
-          };
-        });
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-
-        if (idx >= words.length) {
-          clearInterval(intervalId);
-          streamCancelRef.current = null;
-          setHistories((prev) => {
-            const msgs = prev[conceptName] ?? [];
-            return {
-              ...prev,
-              [conceptName]: msgs.map((m) =>
-                m.id === aiMsgId
-                  ? { ...m, content: fullText, streaming: false, confidence: result.confidence, level: result.understandingLevel }
-                  : m,
-              ),
-            };
-          });
-          setPhase('idle');
-          onNewAnalysis?.(result);
-        }
-      }, 40);
-
-      streamCancelRef.current = () => { clearInterval(intervalId); };
+      streamText(fullText, conceptName, {
+        confidence: result.confidence,
+        level: result.understandingLevel,
+        analysis: result,
+      });
     } catch {
       const errMsg: ChatMessage = {
         id: crypto.randomUUID(),
@@ -158,7 +202,7 @@ export const ConceptChat: React.FC<ConceptChatProps> = ({
       }));
       setPhase('idle');
     }
-  }, [conceptName, input, loading, userId, onNewAnalysis]);
+  }, [conceptName, input, loading, userId, streamText]);
 
   /* Don't render when no concept is selected */
   if (!conceptName) return null;

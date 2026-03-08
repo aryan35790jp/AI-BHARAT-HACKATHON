@@ -56,9 +56,11 @@ from services.bedrock.factory import get_model_chain
 
 from handlers.analyze import handle_analyze
 from handlers.evidence import handle_submit_evidence
+from handlers.expand_concept import handle_expand_concept
 from handlers.mental_model import handle_get_mental_model
 from handlers.interventions import handle_get_interventions
 from handlers.understood import handle_mark_understood
+from handlers.stream_analyze import stream_analyze_generator
 
 # ---------------------------------------------------------------------------
 # Module-level initialization (runs once per cold start)
@@ -97,6 +99,7 @@ ROUTE_TABLE = {
     # Versioned routes (preferred)
     ("POST", "/v1/analyze"): "analyze",
     ("POST", "/v1/evidence"): "evidence",
+    ("POST", "/v1/expand-concept"): "expand_concept",
     ("GET", "/v1/mental-model/{userId}"): "get_mental_model",
     ("GET", "/v1/interventions/{conceptId}"): "get_interventions",
     ("PUT", "/v1/mental-model/{userId}/concepts/{conceptId}/understood"): "mark_understood",
@@ -136,6 +139,19 @@ def lambda_handler(event, context):
     try:
         method = event.get("httpMethod", "").upper()
         resource = event.get("resource", "")
+
+        # --- Detect Lambda Function URL events (InvokeMode=RESPONSE_STREAM) ---
+        # Function URL events have requestContext.http instead of httpMethod
+        if not method:
+            fn_ctx = event.get("requestContext", {}).get("http", {})
+            method = fn_ctx.get("method", "").upper()
+            resource = event.get("rawPath", "")
+
+        # Route /stream-analyze to the streaming generator regardless of origin
+        if resource in ("/stream-analyze", "/stream-analyze/"):
+            if method == "OPTIONS":
+                return iter([b""])
+            return stream_analyze_generator(event, analysis_service)
 
         # --- CORS Preflight ---
         if method == "OPTIONS":
@@ -181,6 +197,10 @@ def lambda_handler(event, context):
         if handler_name == "analyze":
             result = handle_analyze(
                 event, auth, analysis_service, repository, cost_guard, request_logger,
+            )
+        elif handler_name == "expand_concept":
+            result = handle_expand_concept(
+                event, auth, analysis_service, request_logger,
             )
         elif handler_name == "evidence":
             result = handle_submit_evidence(
@@ -255,3 +275,44 @@ def lambda_handler(event, context):
 
         request_logger.log_response(500)
         return response
+
+
+# ---------------------------------------------------------------------------
+# Streaming Handler — Lambda Function URL (InvokeMode=RESPONSE_STREAM)
+# ---------------------------------------------------------------------------
+# This is a SEPARATE entry point from lambda_handler.  It is only invoked
+# when the Lambda Function URL (not API Gateway) receives a request.
+# Lambda streams each `yield` to the browser immediately.
+#
+# How to point Lambda Function URL here:
+#   In the Function URL config set Handler = entrypoint.streaming_handler
+#   OR keep the regular handler and just create a second function that
+#   references this symbol.  Either approach works.
+#
+# CORS for this handler is configured at the Function URL level in AWS
+# (not in response headers) so we don't need to add them here.
+
+def streaming_handler(event, context):
+    """
+    Entry point for Lambda Function URL with InvokeMode=RESPONSE_STREAM.
+
+    Lambda will call this function and stream each yielded bytes object to
+    the HTTP client immediately, without buffering.  This enables true
+    token-by-token SSE streaming without needing a proxy or WebSocket.
+    """
+    # Handle CORS pre-flight.  Function URL CORS is configured in AWS but
+    # some clients still send OPTIONS — return an empty iterator so Lambda
+    # doesn't error.
+    try:
+        request_context = event.get("requestContext", {})
+        method = request_context.get("http", {}).get("method", "").upper()
+        if not method:
+            # Older Function URL event shape
+            method = event.get("httpMethod", "").upper()
+    except Exception:
+        method = "POST"
+
+    if method == "OPTIONS":
+        return iter([b""])
+
+    return stream_analyze_generator(event, analysis_service)

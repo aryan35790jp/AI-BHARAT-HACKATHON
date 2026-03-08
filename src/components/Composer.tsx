@@ -11,6 +11,9 @@ interface ComposerProps {
 
 type Mode = 'explain' | 'code' | 'qa';
 
+/** Modes that are not yet functional — show "Coming Soon" */
+const LOCKED_MODES: ReadonlySet<Mode> = new Set<Mode>(['code', 'qa']);
+
 interface ModeOption {
   id: Mode;
   label: string;
@@ -90,11 +93,14 @@ export const Composer: React.FC<ComposerProps> = ({
     return content;
   }, [mode, content, question, answer]);
 
+  const isLocked = LOCKED_MODES.has(mode);
+
   const canSubmit = useCallback((): boolean => {
+    if (isLocked) return false;
     if (loading || !concept.trim()) return false;
     if (mode === 'qa') return !!(question.trim() && answer.trim());
     return !!content.trim();
-  }, [loading, concept, mode, content, question, answer]);
+  }, [isLocked, loading, concept, mode, content, question, answer]);
 
   const handleSubmit = useCallback(() => {
     if (!canSubmit()) return;
@@ -141,7 +147,29 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* Content area */}
         <div className="px-4 pt-1 pb-2" onKeyDown={handleKeyDown}>
-          {mode !== 'qa' ? (
+          {isLocked ? (
+            /* ── Coming Soon overlay ── */
+            <div className="flex flex-col items-center justify-center py-10 select-none">
+              {/* Animated icon */}
+              <div className="relative mb-4">
+                <div className="absolute inset-0 animate-ping rounded-full bg-accent/20" style={{ animationDuration: '2s' }} />
+                <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent/20 to-purple-500/20 backdrop-blur-sm border border-accent/20">
+                  <svg className="h-6 w-6 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                  </svg>
+                </div>
+              </div>
+              <span className="text-sm font-semibold text-text-primary">Coming Soon</span>
+              <p className="mt-1.5 max-w-[260px] text-center text-xs leading-relaxed text-text-faint">
+                {mode === 'code'
+                  ? 'Code analysis will let you paste code and get understanding scored automatically.'
+                  : 'Q&A reasoning will let you answer targeted questions to demonstrate mastery.'}
+              </p>
+              <div className="mt-4 rounded-full bg-accent/10 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-accent/70">
+                In Development
+              </div>
+            </div>
+          ) : mode !== 'qa' ? (
             <textarea
               ref={textareaRef}
               value={content}
@@ -193,20 +221,30 @@ export const Composer: React.FC<ComposerProps> = ({
         <div className="flex items-center justify-between border-t border-surface-border/30 px-4 py-2.5">
           {/* Mode tabs */}
           <div className="flex items-center gap-0.5">
-            {MODES.map((m) => (
-              <button
-                key={m.id}
-                onClick={() => handleModeChange(m.id)}
-                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all ${
-                  mode === m.id
-                    ? 'bg-accent-subtle text-accent'
-                    : 'text-text-faint hover:bg-surface/60 hover:text-text-muted'
-                }`}
-              >
-                {m.icon}
-                {m.label}
-              </button>
-            ))}
+            {MODES.map((m) => {
+              const locked = LOCKED_MODES.has(m.id);
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => handleModeChange(m.id)}
+                  className={`relative flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all ${
+                    mode === m.id
+                      ? locked
+                        ? 'bg-surface/60 text-text-muted'
+                        : 'bg-accent-subtle text-accent'
+                      : 'text-text-faint hover:bg-surface/60 hover:text-text-muted'
+                  }`}
+                >
+                  {m.icon}
+                  {m.label}
+                  {locked && (
+                    <span className="ml-0.5 rounded bg-amber-500/15 px-1 py-px text-[9px] font-bold uppercase leading-none tracking-wider text-amber-400/80">
+                      Soon
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           {/* Submit area */}

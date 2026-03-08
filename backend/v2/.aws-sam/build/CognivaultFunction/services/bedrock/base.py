@@ -68,6 +68,40 @@ class BaseModelProvider(ABC):
         """
         ...
 
+    def invoke_stream(self, prompt: str):
+        """
+        Stream tokens from the model using Bedrock's streaming API.
+
+        Yields text deltas (str) as they are generated.
+        Uses invoke_model_with_response_stream — each event in the stream
+        contains a partial response in the same JSON schema as invoke_model,
+        with the key field ('generation' for Llama) holding the delta text.
+
+        Raises on invocation error (caller should fall back gracefully).
+        """
+        request_body = self.build_request_body(prompt)
+
+        logger.info(
+            "Streaming model: model_id=%s prompt_chars=%d",
+            self.model_id, len(prompt),
+        )
+
+        response = self.client.invoke_model_with_response_stream(
+            modelId=self.model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=request_body,
+        )
+
+        for event in response.get("body", []):
+            chunk = event.get("chunk")
+            if chunk:
+                data = json.loads(chunk["bytes"].decode("utf-8"))
+                # For Llama models the streaming delta is in the same 'generation' field
+                token = self.extract_text(data)
+                if token:
+                    yield token
+
     def invoke(self, prompt: str) -> Dict[str, Any]:
         """
         Invoke the model and return standardized result.

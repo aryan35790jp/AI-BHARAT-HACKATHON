@@ -86,11 +86,14 @@ class Edge:
 @dataclass
 class AnalysisResult:
     """Output from Bedrock analysis or rule-based fallback."""
-    understandingLevel: str  # surface | partial | solid | deep
+    understandingLevel: str  # unknown | surface | partial | solid | deep
     confidence: float  # 0.0 - 1.0
     debtIndicators: List[DebtIndicator] = field(default_factory=list)
     interventionType: Optional[str] = None
     interventionContent: Optional[InterventionContent] = None
+    missingConcepts: List[str] = field(default_factory=list)
+    suggestedExplanation: Optional[str] = None
+    nextQuestion: Optional[str] = None
     relatedConcepts: List[str] = field(default_factory=list)
     prerequisites: List[str] = field(default_factory=list)
     edges: List[Edge] = field(default_factory=list)
@@ -105,6 +108,9 @@ class AnalysisResult:
             "debtIndicators": [d.to_dict() for d in self.debtIndicators],
             "interventionType": self.interventionType,
             "interventionContent": self.interventionContent.to_dict() if self.interventionContent else None,
+            "missingConcepts": self.missingConcepts,
+            "suggestedExplanation": self.suggestedExplanation,
+            "nextQuestion": self.nextQuestion,
             "relatedConcepts": self.relatedConcepts,
             "prerequisites": self.prerequisites,
             "edges": [e.to_dict() for e in self.edges],
@@ -116,8 +122,8 @@ class AnalysisResult:
     @classmethod
     def from_dict(cls, d: dict) -> "AnalysisResult":
         return cls(
-            understandingLevel=d.get("understandingLevel", "surface"),
-            confidence=float(d.get("confidence", 0.5)),
+            understandingLevel=d.get("understandingLevel", "unknown"),
+            confidence=float(d.get("confidence", 0.0)),
             debtIndicators=[DebtIndicator.from_dict(x) for x in d.get("debtIndicators", [])],
             interventionType=d.get("interventionType"),
             interventionContent=(
@@ -125,6 +131,9 @@ class AnalysisResult:
                 if d.get("interventionContent")
                 else None
             ),
+            missingConcepts=[str(c) for c in d.get("missingConcepts", [])],
+            suggestedExplanation=d.get("suggestedExplanation"),
+            nextQuestion=d.get("nextQuestion"),
             relatedConcepts=d.get("relatedConcepts", []),
             prerequisites=d.get("prerequisites", []),
             edges=[Edge.from_dict(x) for x in d.get("edges", [])],

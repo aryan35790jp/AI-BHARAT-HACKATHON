@@ -22,6 +22,9 @@ const TABS: TabDef[] = [
   { id: 'qa', label: 'Q&A Reasoning', evidenceType: 'qa_reasoning' },
 ];
 
+/** Tabs that are not yet functional — show "Coming Soon" */
+const LOCKED_TABS: ReadonlySet<TabId> = new Set<TabId>(['code', 'qa']);
+
 const escapeHtml = (text: string): string =>
   text
     .replace(/&/g, '&amp;')
@@ -95,7 +98,10 @@ export const EvidenceInput: React.FC<EvidenceInputProps> = ({
     }
   }, [activeTab, explanation, code, question, answer]);
 
+  const isLocked = LOCKED_TABS.has(activeTab);
+
   const isDisabled = useCallback((): boolean => {
+    if (isLocked) return true;
     if (submitting) return true;
     if (!conceptTopic.trim()) return true;
     switch (activeTab) {
@@ -106,7 +112,7 @@ export const EvidenceInput: React.FC<EvidenceInputProps> = ({
       case 'qa':
         return !question.trim() || !answer.trim();
     }
-  }, [submitting, activeTab, conceptTopic, explanation, code, question, answer]);
+  }, [isLocked, submitting, activeTab, conceptTopic, explanation, code, question, answer]);
 
   const handleSubmit = useCallback(() => {
     const tab = TABS.find((t) => t.id === activeTab);
@@ -128,22 +134,55 @@ export const EvidenceInput: React.FC<EvidenceInputProps> = ({
   return (
     <div className="rounded-xl border border-slate-700/80 bg-slate-800/50 p-4">
       <div className="mb-3 flex items-center gap-1 border-b border-slate-700/60 pb-3">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => handleTabChange(tab.id)}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-              activeTab === tab.id
-                ? 'bg-blue-500/20 text-blue-400'
-                : 'text-slate-400 hover:bg-slate-700/60 hover:text-slate-300'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {TABS.map((tab) => {
+          const locked = LOCKED_TABS.has(tab.id);
+          return (
+            <button
+              key={tab.id}
+              onClick={() => handleTabChange(tab.id)}
+              className={`relative flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeTab === tab.id
+                  ? locked
+                    ? 'bg-slate-700/40 text-slate-400'
+                    : 'bg-blue-500/20 text-blue-400'
+                  : 'text-slate-400 hover:bg-slate-700/60 hover:text-slate-300'
+              }`}
+            >
+              {tab.label}
+              {locked && (
+                <span className="ml-1 rounded bg-amber-500/15 px-1 py-px text-[9px] font-bold uppercase leading-none tracking-wider text-amber-400/80">
+                  Soon
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       <div className="space-y-3" onKeyDown={handleKeyDown}>
+        {isLocked ? (
+          /* ── Coming Soon overlay ── */
+          <div className="flex flex-col items-center justify-center py-12 select-none">
+            <div className="relative mb-4">
+              <div className="absolute inset-0 animate-ping rounded-full bg-blue-500/20" style={{ animationDuration: '2s' }} />
+              <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500/20 to-purple-500/20 backdrop-blur-sm border border-blue-500/20">
+                <svg className="h-6 w-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                </svg>
+              </div>
+            </div>
+            <span className="text-sm font-semibold text-slate-200">Coming Soon</span>
+            <p className="mt-1.5 max-w-[280px] text-center text-xs leading-relaxed text-slate-500">
+              {activeTab === 'code'
+                ? 'Code analysis will let you paste code and get understanding scored automatically.'
+                : 'Q&A reasoning will let you answer targeted questions to demonstrate mastery.'}
+            </p>
+            <div className="mt-4 rounded-full bg-blue-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-blue-400/70">
+              In Development
+            </div>
+          </div>
+        ) : (
+          <>
         <input
           value={conceptTopic}
           onChange={(e) => setConceptTopic(e.target.value)}
@@ -194,6 +233,8 @@ export const EvidenceInput: React.FC<EvidenceInputProps> = ({
               className="h-24 w-full resize-none rounded-lg border border-slate-600/60 bg-slate-900/80 p-3 text-sm leading-relaxed text-slate-200 placeholder-slate-500 outline-none transition-colors focus:border-blue-500/60"
             />
           </div>
+        )}
+          </>
         )}
 
         {error && (

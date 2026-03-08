@@ -16,7 +16,7 @@ Architecture Decision:
 # ---------------------------------------------------------------------------
 # Valid enum values — used for schema enforcement
 # ---------------------------------------------------------------------------
-VALID_UNDERSTANDING_LEVELS = frozenset({"surface", "partial", "solid", "deep"})
+VALID_UNDERSTANDING_LEVELS = frozenset({"unknown", "surface", "partial", "solid", "deep"})
 
 VALID_DEBT_TYPES = frozenset({
     "circular",
@@ -39,6 +39,7 @@ VALID_EVIDENCE_TYPES = frozenset({"explanation", "code", "qa_reasoning"})
 # Level weights for progress calculation
 # ---------------------------------------------------------------------------
 LEVEL_WEIGHTS = {
+    "unknown": 0.0,
     "surface": 0.15,
     "partial": 0.40,
     "solid": 0.75,
@@ -203,6 +204,45 @@ DEPTH_KEYWORDS = {
         "something like", "heard that", "read that",
     ],
 }
+
+# ---------------------------------------------------------------------------
+# Semantic uncertainty signals — patterns indicating the student doesn't know
+# These are used by the rule-based fallback to approximate semantic detection.
+# Patterns are checked as substrings in the lowercased explanation.
+# ---------------------------------------------------------------------------
+UNCERTAINTY_SIGNALS = [
+    # Direct admissions of not knowing
+    "i don't know", "i dont know", "idk", "no idea", "no clue",
+    "not sure", "don't understand", "dont understand",
+    "never heard", "haven't learned", "havent learned",
+    "i forgot", "can't remember", "cant remember",
+    "don't remember", "dont remember", "unfamiliar",
+    "what is this", "what's this", "whats this",
+    "not familiar", "don't really know", "dont really know",
+    # Confusion signals
+    "this is confusing", "confused about", "makes no sense",
+    "i have no", "no understanding", "clueless",
+    # Minimal effort / deflection
+    "pass", "skip", "next question",
+    # Pure opinions without any explanation (short opinion phrases)
+    "is good", "is bad", "is cool", "is nice", "is great", "is interesting",
+    "is boring", "is hard", "is easy", "is important", "is useful",
+    "think it is good", "think it is bad", "think it is cool",
+    "think it is nice", "think it is great", "think it is interesting",
+    "think it is boring", "think it is hard", "think it is easy",
+]
+
+# ---------------------------------------------------------------------------
+# Mechanism indicators — words that suggest the student explains HOW/WHY
+# ---------------------------------------------------------------------------
+MECHANISM_INDICATORS = [
+    "because", "causes", "results in", "leads to", "by doing",
+    "in order to", "so that", "which means", "the reason",
+    "works by", "achieved through", "under the hood",
+    "internally", "the process", "step by step", "first",
+    "then", "finally", "converts", "transforms", "compiles",
+    "allocates", "executes", "evaluates", "resolves",
+]
 
 DEBT_KEYWORDS = {
     "circular": [

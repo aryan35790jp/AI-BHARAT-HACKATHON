@@ -26,6 +26,8 @@ from config.constants import (
     DEPTH_KEYWORDS,
     DOMAIN_KNOWLEDGE,
     LEVEL_WEIGHTS,
+    MECHANISM_INDICATORS,
+    UNCERTAINTY_SIGNALS,
     VALID_DEBT_TYPES,
     VALID_INTERVENTION_TYPES,
     VALID_UNDERSTANDING_LEVELS,
@@ -180,11 +182,11 @@ def parse_model_response(raw_text: str) -> Dict[str, Any]:
 
 def _validate_parsed_data(data: dict) -> dict:
     """Validate and normalize parsed model output."""
-    level = data.get("understandingLevel", "surface")
+    level = data.get("understandingLevel", "unknown")
     if level not in VALID_UNDERSTANDING_LEVELS:
-        level = "surface"
+        level = "unknown"
 
-    confidence = _clamp(data.get("confidence", 0.5))
+    confidence = _clamp(data.get("confidence", 0.0))
 
     debt_indicators = []
     for d in data.get("debtIndicators", []):
@@ -214,6 +216,15 @@ def _validate_parsed_data(data: dict) -> dict:
     else:
         intervention_type = None
 
+    # New semantic evaluation fields
+    missing_concepts = [str(c) for c in data.get("missingConcepts", [])]
+    suggested_explanation = data.get("suggestedExplanation")
+    if suggested_explanation is not None:
+        suggested_explanation = str(suggested_explanation)
+    next_question = data.get("nextQuestion")
+    if next_question is not None:
+        next_question = str(next_question)
+
     related = [str(c) for c in data.get("relatedConcepts", [])]
     prerequisites = [str(p) for p in data.get("prerequisites", [])]
 
@@ -232,6 +243,9 @@ def _validate_parsed_data(data: dict) -> dict:
         "debtIndicators": debt_indicators,
         "interventionType": intervention_type,
         "interventionContent": intervention_content,
+        "missingConcepts": missing_concepts,
+        "suggestedExplanation": suggested_explanation,
+        "nextQuestion": next_question,
         "relatedConcepts": related,
         "prerequisites": prerequisites,
         "edges": edges,
@@ -249,11 +263,12 @@ def rule_based_fallback(
 
     Architecture Decision:
       This ensures the API ALWAYS returns a valid response.
-      The rule-based system uses:
-      - Keyword frequency analysis for understanding depth
-      - Explanation length heuristics
-      - Concept difficulty from DOMAIN_KNOWLEDGE
-      - Pattern matching for debt indicators
+      The rule-based system uses semantic-approximation heuristics:
+      1. Uncertainty detection — checks many ways a student might express
+         "I don't know" rather than matching a single phrase.
+      2. Substance analysis — measures how much real content vs filler.
+      3. Mechanism detection — checks if the student explains how/why.
+      4. Depth keyword scoring — supplementary signal from vocabulary.
 
       Quality is lower than LLM analysis, but:
       - Zero cost
@@ -262,36 +277,89 @@ def rule_based_fallback(
       - Consistent results (good for testing)
     """
     norm = _normalize_concept(concept)
-    text_lower = explanation.lower()
+    text_lower = explanation.lower().strip()
     word_count = len(explanation.split())
     char_count = len(explanation)
+    concept_label = concept.replace("_", " ").title()
 
-    # --- Determine understanding level ---
-    level_scores = {"surface": 0, "partial": 0, "solid": 0, "deep": 0}
+    # ── Dimension 1: Detect uncertainty / "I don't know" intent ──
+    # Check broad set of uncertainty signals (semantic approximation)
+    uncertainty_hits = sum(1 for sig in UNCERTAINTY_SIGNALS if sig in text_lower)
+    is_uncertain = uncertainty_hits >= 1
+
+    # Very short responses (< 8 words) with no substance are also uncertain
+    filler_words = {"the", "a", "an", "is", "it", "its", "this", "that", "i", "um", "uh", "well", "like", "so"}
+    substantive_words = [w for w in text_lower.split() if w not in filler_words and len(w) > 2]
+    substantive_count = len(substantive_words)
+
+    if word_count <= 5 and substantive_count <= 2:
+        is_uncertain = True
+
+    # ── Dimension 2: Mechanism presence ──
+    mechanism_hits = sum(1 for ind in MECHANISM_INDICATORS if ind in text_lower)
+    has_mechanism = mechanism_hits >= 2
+
+    # ── Dimension 3: Explanation depth (substance ratio) ──
+    substance_ratio = substantive_count / max(word_count, 1)
+
+    # ── Dimension 4: Keyword depth scoring (supplementary) ──
+    level_scores: Dict[str, int] = {"unknown": 0, "surface": 0, "partial": 0, "solid": 0, "deep": 0}
+
+    if is_uncertain:
+        level_scores["unknown"] += 5
 
     for level, keywords in DEPTH_KEYWORDS.items():
         for kw in keywords:
             if kw in text_lower:
                 level_scores[level] += 1
 
-    # Length heuristics
-    if word_count < 15:
-        level_scores["surface"] += 3
-    elif word_count < 40:
+    # Length-based substance heuristics
+    if word_count < 8:
+        level_scores["unknown"] += 3
+    elif word_count < 20:
+        level_scores["surface"] += 2
+    elif word_count < 50:
         level_scores["partial"] += 2
-    elif word_count < 100:
-        level_scores["solid"] += 2
+    elif word_count < 120:
+        if has_mechanism:
+            level_scores["solid"] += 3
+        else:
+            level_scores["partial"] += 2
     else:
-        level_scores["deep"] += 2
+        if has_mechanism:
+            level_scores["deep"] += 3
+        else:
+            level_scores["solid"] += 2
+
+    # Mechanism bonus
+    if has_mechanism:
+        level_scores["solid"] += mechanism_hits
+        if mechanism_hits >= 3:
+            level_scores["deep"] += 2
+
+    # Low substance ratio penalizes
+    if substance_ratio < 0.4 and word_count > 5:
+        level_scores["surface"] += 2
 
     # Concept difficulty adjustment
     difficulty = CONCEPT_DIFFICULTY.get(norm, 3)
-    if word_count < difficulty * 10:
+    if word_count < difficulty * 8:
         level_scores["surface"] += 1
 
-    # Pick highest scoring level
-    level = max(level_scores, key=level_scores.get)
-    confidence = _clamp(0.3 + (word_count / 200) + (level_scores[level] * 0.05), 0.2, 0.85)
+    # ── Determine level ──
+    level = max(level_scores, key=level_scores.get)  # type: ignore[arg-type]
+
+    # ── Compute confidence ──
+    if level == "unknown":
+        confidence = _clamp(0.05 + (substantive_count * 0.02), 0.05, 0.20)
+    elif level == "surface":
+        confidence = _clamp(0.20 + (word_count / 300) + (substance_ratio * 0.1), 0.20, 0.40)
+    elif level == "partial":
+        confidence = _clamp(0.40 + (word_count / 400) + (mechanism_hits * 0.05), 0.40, 0.70)
+    elif level == "solid":
+        confidence = _clamp(0.70 + (mechanism_hits * 0.04) + (word_count / 800), 0.70, 0.90)
+    else:  # deep
+        confidence = _clamp(0.90 + (mechanism_hits * 0.02), 0.90, 0.98)
 
     # --- Detect debt indicators ---
     debt_indicators = []
@@ -299,7 +367,7 @@ def rule_based_fallback(
     # Circular definition detection
     concept_words = norm.replace("_", " ").split()
     concept_in_explanation = sum(1 for w in concept_words if w in text_lower)
-    if concept_in_explanation >= len(concept_words) and word_count < 30:
+    if concept_in_explanation >= len(concept_words) and word_count < 30 and substantive_count < 10:
         debt_indicators.append({
             "type": "circular",
             "severity": 0.6,
@@ -309,7 +377,7 @@ def rule_based_fallback(
 
     # Parroting detection
     parroting_count = sum(1 for kw in DEBT_KEYWORDS.get("parroting", []) if kw in text_lower)
-    if parroting_count >= 2 and word_count < 50:
+    if parroting_count >= 2 and not has_mechanism:
         debt_indicators.append({
             "type": "parroting",
             "severity": 0.5,
@@ -319,7 +387,7 @@ def rule_based_fallback(
 
     # Logical jump detection
     jump_count = sum(1 for kw in DEBT_KEYWORDS.get("logical_jump", []) if kw in text_lower)
-    if jump_count >= 1 and word_count < 40:
+    if jump_count >= 1 and word_count < 40 and not has_mechanism:
         debt_indicators.append({
             "type": "logical_jump",
             "severity": 0.4,
@@ -327,8 +395,8 @@ def rule_based_fallback(
             "explanation": "The explanation may skip important reasoning steps between ideas.",
         })
 
-    # Confidence mismatch — short but very confident
-    if word_count < 20 and not any(kw in text_lower for kw in DEPTH_KEYWORDS["surface"]):
+    # Confidence mismatch — short but uses confident language without substance
+    if word_count < 20 and not is_uncertain and substantive_count < 6:
         debt_indicators.append({
             "type": "confidence_mismatch",
             "severity": 0.3,
@@ -336,13 +404,63 @@ def rule_based_fallback(
             "explanation": "The explanation is very brief, which may indicate surface-level understanding despite apparent confidence.",
         })
 
-    # --- Build intervention ---
+    # --- Build missing concepts list ---
+    missing_concepts: List[str] = []
     prereqs = _get_prerequisites(concept)
+    if level in ("unknown", "surface", "partial"):
+        # For known concepts, suggest key prerequisites as missing
+        for p in prereqs[:3]:
+            p_label = p.replace("_", " ")
+            if p_label not in text_lower:
+                missing_concepts.append(p_label)
+        if not missing_concepts:
+            missing_concepts = ["core mechanism", "practical examples"]
+
+    # --- Build suggested explanation for low confidence ---
+    suggested_explanation: Optional[str] = None
+    next_question: Optional[str] = None
+
+    if confidence < 0.30:
+        suggested_explanation = (
+            f"{concept_label} is an important concept to understand. "
+            f"{'It builds on: ' + ', '.join(p.replace('_', ' ') for p in prereqs[:3]) + '. ' if prereqs else ''}"
+            f"Understanding it requires knowing both what it is and how it works in practice. "
+            f"Try to think about a concrete example where you've seen or encountered it."
+        )
+        next_question = (
+            f"Can you describe a simple example of {concept_label.lower()} "
+            f"and explain what it does step by step?"
+        )
+    elif confidence < 0.70:
+        next_question = (
+            f"You've got the basics — can you now explain *why* {concept_label.lower()} "
+            f"works the way it does, or what would happen without it?"
+        )
+
+    # --- Build intervention ---
     intervention_type = None
     intervention_content = None
 
-    if level in ("surface", "partial") or debt_indicators:
-        if debt_indicators and debt_indicators[0]["type"] == "circular":
+    if level in ("unknown", "surface", "partial") or debt_indicators:
+        if level == "unknown":
+            intervention_type = "mental_model"
+            intervention_content = {
+                "title": f"Let's learn about {concept_label}",
+                "explanation": (
+                    f"It sounds like you may not be familiar with {concept_label.lower()} yet. "
+                    f"{'It builds on: ' + ', '.join(p.replace('_', ' ') for p in prereqs[:3]) + '. ' if prereqs else ''}"
+                    f"Let me help you build a mental model of this concept."
+                ),
+                "examples": [
+                    f"Think of {concept_label.lower()} as a building block — "
+                    f"it's something that more advanced concepts depend on.",
+                    f"Try relating {concept_label.lower()} to something you already know.",
+                ],
+                "followUpQuestions": [
+                    next_question or f"What do you think {concept_label.lower()} might be used for?",
+                ],
+            }
+        elif debt_indicators and debt_indicators[0]["type"] == "circular":
             intervention_type = "clarification"
         elif debt_indicators and debt_indicators[0]["type"] == "parroting":
             intervention_type = "counter_example"
@@ -351,26 +469,27 @@ def rule_based_fallback(
         else:
             intervention_type = "aha_bridge"
 
-        intervention_content = {
-            "title": f"Deepen your understanding of {concept.replace('_', ' ').title()}",
-            "explanation": (
-                f"Your explanation of {concept.replace('_', ' ')} shows "
-                f"{level}-level understanding. "
-                f"Try explaining it using a concrete example or analogy. "
-                f"{'Consider reviewing prerequisites: ' + ', '.join(prereqs) + '. ' if prereqs else ''}"
-                f"Focus on the 'why' and 'how', not just the 'what'."
-            ),
-            "examples": [
-                f"Try implementing a small code example that demonstrates {concept.replace('_', ' ')}.",
-                f"Explain {concept.replace('_', ' ')} as if teaching a classmate who knows "
-                + (prereqs[0].replace('_', ' ') if prereqs else 'basic programming')
-                + " but not this concept.",
-            ],
-            "followUpQuestions": [
-                f"What would happen if you didn't use {concept.replace('_', ' ')} in your code?",
-                f"Can you give a real-world analogy for {concept.replace('_', ' ')}?",
-            ],
-        }
+        if not intervention_content:
+            intervention_content = {
+                "title": f"Deepen your understanding of {concept_label}",
+                "explanation": (
+                    f"Your explanation of {concept_label.lower()} shows "
+                    f"{level}-level understanding. "
+                    f"Try explaining it using a concrete example or analogy. "
+                    f"{'Consider reviewing prerequisites: ' + ', '.join(p.replace('_', ' ') for p in prereqs) + '. ' if prereqs else ''}"
+                    f"Focus on the 'why' and 'how', not just the 'what'."
+                ),
+                "examples": [
+                    f"Try thinking of a concrete example that demonstrates {concept_label.lower()}.",
+                    f"Explain {concept_label.lower()} as if teaching a classmate who knows "
+                    + (prereqs[0].replace('_', ' ') if prereqs else 'the basics')
+                    + " but not this concept.",
+                ],
+                "followUpQuestions": [
+                    next_question or f"What would happen if {concept_label.lower()} didn't exist or wasn't used?",
+                    f"Can you give a real-world analogy for {concept_label.lower()}?",
+                ],
+            }
 
     # --- Build edges ---
     edges = [
@@ -379,15 +498,12 @@ def rule_based_fallback(
     ]
 
     # --- Build rich relatedConcepts ---
-    # Include prerequisites, reverse-dependents, and domain siblings
     related = set(prereqs)
 
-    # Reverse lookup: concepts that have `norm` as a prerequisite
     for other_concept, other_prereqs in DOMAIN_KNOWLEDGE.items():
         if norm in other_prereqs and other_concept != norm:
             related.add(other_concept)
 
-    # Domain siblings: other concepts with overlapping prerequisites
     if prereqs:
         for other_concept, other_prereqs in DOMAIN_KNOWLEDGE.items():
             if other_concept == norm:
@@ -398,26 +514,20 @@ def rule_based_fallback(
             if len(related) >= 8:
                 break
 
-    # If concept was NOT in DOMAIN_KNOWLEDGE at all, scan for partial name match
     if not related:
-        concept_words = set(norm.replace("_", " ").split())
+        concept_words_set = set(norm.replace("_", " ").split())
         for dk_concept in DOMAIN_KNOWLEDGE:
             dk_words = set(dk_concept.replace("_", " ").split())
-            if concept_words & dk_words:
+            if concept_words_set & dk_words:
                 related.add(dk_concept)
             if len(related) >= 6:
                 break
 
-    # Ultimate fallback: if STILL no related concepts, pick foundational concepts
     if not related:
-        fundamentals = ["variables", "data_types", "control_flow", "functions", "loops", "classes"]
-        for f in fundamentals:
-            if f != norm:
-                related.add(f)
-            if len(related) >= 6:
-                break
-
-    related_list = sorted(related - {norm})[:8]
+        # No domain graph match — return empty rather than assume programming
+        related_list: list = []
+    else:
+        related_list = sorted(related - {norm})[:8]
 
     return {
         "understandingLevel": level,
@@ -425,6 +535,9 @@ def rule_based_fallback(
         "debtIndicators": debt_indicators,
         "interventionType": intervention_type,
         "interventionContent": intervention_content,
+        "missingConcepts": missing_concepts,
+        "suggestedExplanation": suggested_explanation,
+        "nextQuestion": next_question,
         "relatedConcepts": related_list,
         "prerequisites": prereqs[:5],
         "edges": edges,
@@ -506,6 +619,10 @@ class AnalysisService:
                     provider.provider_name, provider.model_id,
                 )
                 result = provider.invoke(prompt)
+                logger.info(
+                    "Raw model response from %s (%d chars): %.1000s",
+                    provider.provider_name, len(result["text"]), result["text"],
+                )
                 parsed = parse_model_response(result["text"])
 
                 return self._build_result(
@@ -539,6 +656,38 @@ class AnalysisService:
         raise AnalysisFailedError(
             f"All models failed and rule-based fallback is disabled. Last error: {last_error}"
         )
+
+    def expand_concept(self, concept: str) -> Dict[str, Any]:
+        """
+        Call the LLM to generate domain-specific related concepts for the graph.
+
+        Returns {"domain": str, "concepts": [str, ...]}
+        Falls back to empty list if all models fail — graph will use satellite stubs.
+        """
+        from services.bedrock.prompts import build_expand_prompt
+
+        prompt = build_expand_prompt(concept)
+        for provider in self.model_chain:
+            try:
+                result = provider.invoke(prompt)
+                logger.info(
+                    "expand_concept raw response from %s (%d chars): %.500s",
+                    provider.provider_name, len(result["text"]), result["text"],
+                )
+                cleaned = _extract_json_string(result["text"])
+                data = json.loads(cleaned)
+                concepts = [str(c).strip() for c in data.get("concepts", []) if c]
+                domain = str(data.get("domain", "general")).strip()
+                if concepts:
+                    return {"domain": domain, "concepts": concepts[:12]}
+            except Exception as exc:
+                logger.warning(
+                    "expand_concept model %s failed: %s", provider.provider_name, exc
+                )
+                continue
+
+        logger.warning("expand_concept: all models failed for concept=%s", concept)
+        return {"domain": "general", "concepts": []}
 
     def _build_result(
         self,
@@ -574,11 +723,14 @@ class AnalysisService:
                 existing_pairs.add((de.source, de.target))
 
         result = AnalysisResult(
-            understandingLevel=parsed.get("understandingLevel", "surface"),
-            confidence=parsed.get("confidence", 0.5),
+            understandingLevel=parsed.get("understandingLevel", "unknown"),
+            confidence=parsed.get("confidence", 0.0),
             debtIndicators=debt_indicators,
             interventionType=parsed.get("interventionType"),
             interventionContent=intervention_content,
+            missingConcepts=parsed.get("missingConcepts", []),
+            suggestedExplanation=parsed.get("suggestedExplanation"),
+            nextQuestion=parsed.get("nextQuestion"),
             relatedConcepts=parsed.get("relatedConcepts", []),
             prerequisites=parsed.get("prerequisites", []),
             edges=edges,
